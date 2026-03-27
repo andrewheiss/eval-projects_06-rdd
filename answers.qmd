@@ -1,0 +1,508 @@
+---
+title: "Mandatory school attendance program"
+subtitle: "Problem set 6 --- PMAP 8521, SEMESTER YEAR"
+author: "YOUR NAME HERE"  # Replace with your actual name
+date: "DATE GOES HERE"  # Replace with the date
+date-format: "long"
+bibliography: references.bib
+link-citations: true
+format:
+  html:
+    toc: true
+    knitr:
+      opts_chunk: 
+        dev: "ragg_png"
+        dpi: 300
+        fig-align: "center"
+  typst:
+    toc: true
+    toc-title: Contents
+    citeproc: true
+    output-file: PREFIX_eval-06-rdd.pdf
+    pdf-standard: ua-1
+    callout-appearance: minimal
+    linkcolor: "#a52c60"
+    filters:
+      - math-alt.lua
+    include-in-header: 
+      text: |
+        // TOC stuff
+        // Make the title centered and slightly smaller than a full heading
+        #show outline: it => {
+          show heading: it => align(center, text(size: 0.75em, it))
+          it
+        }
+
+        // Allow callout blocks to break across pages
+        #show block.where(breakable: false, radius: 2pt): it => {
+          let fields = it.fields()
+          let _ = fields.remove("breakable")
+          let body = fields.remove("body")
+          block(..fields, breakable: true, body)
+        }
+    include-before-body: 
+      text: |
+        // Color links with pink-ish red from viridis plasma: 
+        // viridisLite::viridis(8, option = "inferno", begin = 0.1, end = 0.9)[4]
+        // #show link: set text(fill: rgb(""))
+
+        // Keep track of previous heading levels
+        #let last-heading-level = state("last-heading-level", 0)
+
+        // Add page breaks before all level 1 headings
+        // Add page breaks before level 2 headings that don't come after level 1
+        #show heading: it => {
+          context {
+            let prev-level = last-heading-level.get()
+
+            if it.level == 1 {
+              pagebreak(weak: true)
+              last-heading-level.update(1)
+            } else if it.level == 2 {
+              if prev-level != 1 {
+                pagebreak(weak: true)
+              }
+              last-heading-level.update(2)
+            } else {
+              last-heading-level.update(it.level)
+            }
+          }
+          it
+        }
+  pdf:
+    toc: true
+  docx:
+    toc: true
+---
+
+# Overview
+
+There is substantial research and evidence that class attendance has a positive and significant effect on student performance [@CFE:2011]. Because of this, state and local government agencies and school districts have designed programs and policies that incentivize students to not miss school days. Examples include tangible prizes like colorful pendants and free tickets to events [@Otterman:2011], automated calls from celebrities [@Santos:2011], or class policies that mandate attendance [@DobkinGilMarion:2010]. 
+
+Existing research has used a range of methods to test the relationship between attendance programs and student performance, including simple regression analysis [@LukkarinenKoivukangasSeppala:2016], randomized experiments [@ChenLin:2008], and regression discontinuity approaches [@DobkinGilMarion:2010].
+
+In this assignment, you will use regression discontinuity approaches to measure the effect of a hypothetical program on hypothetical student grades. **This isn't actually a real program or real data! This is 100% simulated data!**
+
+In this simulated program, high school students who have less than 80% attendance during their junior year (11th grade) are assigned to a mandatory school attendance program during their senior year (12th grade). This program requires them to attend school and also provides them with additional support and tutoring to help them attend and remain in school. At the end of their senior year, students take a final test to assess their overall learning in high school.
+
+The dataset I've provided contains four columns:
+
+| Variable     | Definition                                                                                          |
+|:-------------|:----------------------------------------------------------------------------------------------------|
+| `id`         | A randomly assigned student ID number                                                               |
+| `attendance` | The proportion of days of school attended during a student's junior year (0--100)                   |
+| `treatment`  | Binary variable indicating if a student was assigned to the attendance program in their senior year |
+| `grade`      | A student's final test grade at the end of their senior year                                        |
+
+The code below loads the data. **You don't need to modify anything in this chunk of code---you only need to run it.**
+
+```{r}
+#| label: load-libraries-data
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(rdrobust)
+library(rddensity)
+library(parameters)
+library(modelsummary)
+library(tinytable)
+
+program <- read_csv("data/attendance_program.csv")
+```
+
+# Step 1: Determine if process of assigning treatment is rule-based
+
+**Was assignment to this program based on an arbitrary rule? Is it a good candidate for a regression discontinuity approach? Why or why not?**
+
+::: {.callout-tip title="Answer"}
+From the description of the program, it seems like this is a good candidate for regression discontinuity. A rule clearly determines who gets assigned to the program, which means that people who have attendance right before and right after the threshold are likely comparable, thus creating treatment and control groups.
+:::
+
+# Step 2: Determine if the design is fuzzy or sharp
+
+Make a plot that shows the running variable (`attendance`) on the x-axis and the program indicator variable (`treatment`) on the y-axis. Show the relationship using points (`geom_point`) and color the points by `treatment`.
+
+**How strict was the application of the rule? Did any students with attendance above 80% get into the attendance program, or did any students with attendance under 80% not get into the program? Is there a sharp difference in treatment at the cutpoint?**
+
+::: {.callout-tip title="Answer"}
+
+Based on this graph, no students with high attendance participated in the program, and all students with low attendance participated in the program. There's perfect compliance (hooray for nice fake data!), so we can safely say that this is a sharp design.
+
+```{r}
+#| label: fig-check-fuzzy-sharp
+#| fig-alt: |
+#|   Scatter chart of attendance in junior year (x-axis, 0–100) against
+#|   program participation status (y-axis). Points are colored by treatment
+#|   group and jittered vertically for visibility. A vertical line marks the
+#|   80% cutoff. All points below 80% fall in the treated group and all
+#|   points at or above 80% fall in the untreated group with no crossovers,
+#|   confirming a sharp regression discontinuity design with perfect
+#|   compliance.
+
+ggplot(program, aes(x = attendance, y = treatment, color = treatment)) +
+  geom_point(
+    size = 0.5,
+    alpha = 0.5,
+    position = position_jitter(width = 0, height = 0.25, seed = 1234)
+  ) +
+  geom_vline(xintercept = 80) +
+  labs(
+    x = "Attendance in junior year",
+    y = "Participated in attendance program"
+  ) +
+  guides(color = "none") # Turn off the color legend, since it's redundant
+```
+
+:::
+
+# Step 3: Check for discontinuity in running variable around cutpoint
+
+Next, you should check that there was no manipulation in the running variable. We don't want to see a ton of students with 81% or 79% attendance, since that could be a sign that administrators fudged the numbers to either push students into the program or out of the program.
+
+First, make a histogram of the running variable and see if there are any big jumps around the threshold. Fill the histogram by `treatment` and add a vertical line at 80 (`geom_vline(xintercept = 80)`) to show the cutoff. Use an appropriate bin width. If the column near 80 is split into two different colors (it might be, since it might be showing 79 and 80 together), add `boundary = 80` inside `geom_histogram()` to force ggplot to start a bar at 80 and not include 79.
+
+**Does it look like there's an unexpected jump in the running variable around the cutoff?**
+
+::: {.callout-tip title="Answer"}
+
+Based on @fig-check-running-discontinuity, there might be an unexpected jump in attendance around 80. There's a dip in attendance right before 80 (in the 78–79 range), which might signal that people are potentially falsely reporting slightly higher attendance to get out of the program. We can test this statistically with a McCrary density test, which shows if the discontinuity in the running variable at the cutoff is significant.
+
+```{r}
+#| label: fig-check-running-discontinuity
+#| fig-alt: |
+#|   Histogram of attendance in junior year with bars filled by treatment
+#|   status. Bars are 2 percentage points wide with the boundary aligned at
+#|   the 80% cutoff, marked by a vertical line. The distribution is roughly
+#|   uniform across most of the range, but there is a slight dip in the
+#|   78–79% range just below the cutoff, which may suggest minor manipulation
+#|   of the running variable near the threshold.
+
+ggplot(program, aes(x = attendance, fill = treatment)) +
+  geom_histogram(binwidth = 2, color = "white", boundary = 80) +
+  geom_vline(xintercept = 80) +
+  labs(x = "Attendance in junior year", y = "Count")
+```
+
+:::
+
+Next, conduct a McCrary density test with `rdplotdensity()` from the `rddensity` library. Refer to the in-class example for the syntax (you'll need to specify `rdd`, `X` (note that it's capitalized), and `type = "both"`). Also, if you don't want two plots to show up when you render, make sure you assign the output of `rdplotdensity()` to a variable.
+
+**Is there a substantial jump at the cutpoint?**
+
+::: {.callout-tip title="Answer"}
+
+According to @fig-check-running-discontinuity-mccrary, there's not really a significant change in the density around the cutpoint---the confidence intervals overlap substantially. If you run `summary(density_jump_stat)` and look at the last line of output, you can see that the t-statistic has a p-value well above 0.05, which means the jump is not statistically significant. We can safely say that the running variable was assigned consistently and there wasn't any manipulation to get people into or out of the program.
+
+```{r}
+#| label: fig-check-running-discontinuity-mccrary
+#| warning: false
+#| fig-alt: |
+#|   McCrary density test plot showing the estimated density of attendance in
+#|   junior year on either side of the 80% cutoff. Points represent observed
+#|   density estimates and lines show fitted density with shaded confidence
+#|   interval ribbons. The confidence intervals on both sides of the cutoff
+#|   overlap substantially at the threshold, indicating no statistically
+#|   significant discontinuity in the running variable and no evidence of
+#|   manipulation.
+
+density_jump_stat <- rddensity(program$attendance, c = 80)
+
+test_density <- rdplotdensity(
+  rdd = density_jump_stat,
+  X = program$attendance,
+  type = "both" # This adds both points and lines
+)
+summary(density_jump_stat)
+```
+
+:::
+
+# Step 4: Check for discontinuity in outcome across running variable
+
+Make a scatterplot with the running variable on the x-axis (`attendance`) and the outcome variable on the y-axis (`grade`), with the points colored by treatment (`treatment`). Make the points small (`size = 0.5` or something similar) and semitransparent (`alpha = 0.5` or something similar) since there are a lot of them. Add a vertical line at the cutoff point. Add two `geom_smooth()` lines: one using data before the cutoff and one using data after the cutoff. Make sure both lines use `method = "lm"`. Refer to the example for the code you need to do this.
+
+**Based on this graph, does the program have an effect? Is there a discontinuity in outcome around the cutpoint? Interpret the effect (or non-effect) of the program.**
+
+::: {.callout-tip title="Answer"}
+
+If we look just at this graph, it looks like there might be a jump at the cutoff, but it seems small. People with 79% attendance have much higher average grades than those with 81%. Part of the smallness of this effect is likely due to the shape of the relationship. For those with low grades, the relationship isn't really linear---notice how poorly the straight trendline fits the data where attendance is 20–40%, or where it's 70–80%. Drawing a line across the full data isn't appropriate when we only want to look at a section of the data.
+
+If we include a nonparametric loess trendline, we can see this even better---the curvy trendline fits the data nicely, and the gap at the cutoff is bigger.
+
+```{r}
+#| label: check-outcome-discontinuity
+#| message: false
+#| fig-alt: |
+#|   Scatter chart of attendance in junior year (x-axis) against final test
+#|   grade (y-axis), with points colored by treatment group. A vertical line
+#|   marks the 80% attendance cutoff. Linear regression lines with confidence
+#|   ribbons and gray loess curves are fitted separately to students below and
+#|   above the threshold. The linear trend fits poorly for students with very
+#|   low attendance (roughly 20–40%), while the loess curves reveal a more
+#|   pronounced jump in grades at the 80% cutoff than the straight lines
+#|   suggest.
+
+ggplot(program, aes(x = attendance, y = grade, color = treatment)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(
+    data = filter(program, attendance < 80),
+    method = "lm"
+  ) +
+  geom_smooth(
+    data = filter(program, attendance < 80),
+    method = "loess",
+    linewidth = 0.5,
+    color = "grey50",
+    se = FALSE
+  ) +
+  geom_smooth(
+    data = filter(program, attendance >= 80),
+    method = "lm"
+  ) +
+  geom_smooth(
+    data = filter(program, attendance >= 80),
+    method = "loess",
+    linewidth = 0.5,
+    color = "grey50",
+    se = FALSE
+  ) +
+  geom_vline(xintercept = 80) +
+  labs(x = "Attendance in junior year", y = "Grade at end of high school")
+```
+
+:::
+
+# Step 5: Measure the size of the effect
+
+Now you need to measure the size and statistical significance of the discontinuity. If there's a jump because of the program, how big is it and how much can we trust it? You'll do this two ways: (1) parametrically with linear regression and (2) nonparametrically with curvy lines and fancy econometrics algorithms built in to the `rdrobust()` function.
+
+## Parametric estimation
+
+Create a new dataset based on `program` that has a new variable in it named `attendance_centered`. This will be the value of `attendance` minus 80. This centers student attendance around the cutpoint and makes it easier to interpret the intercept coefficient in linear models since it shifts the y-intercept up to the cutpoint instead of zero.
+
+::: {.callout-tip title="Answer"}
+
+```{r}
+#| label: center-attendance
+
+program <- program |> 
+  mutate(attendance_centered = attendance - 80)
+```
+
+:::
+
+Run a regression model explaining `grade` with `attendance_centered + treatment`:
+
+$$
+\text{Grade} = \beta_0 + \beta_1 \text{Attendance}_\text{centered} + \beta_2 \text{Program} + \epsilon
+$$
+
+**Interpret the three coefficients. How big is the effect of the program? Is it statistically significant?**
+
+::: {.callout-tip title="Answer"}
+
+```{r}
+#| label: simple-model
+
+model_simple <- lm(grade ~ attendance_centered + treatment, data = program)
+model_parameters(model_simple, verbose = FALSE)
+```
+
+Here's what these coefficients mean:
+
+- $\beta_0$: This is the intercept. Because we centered test scores, it shows the average final score at the 80% threshold. People who had attendance right at the threshold scored 66.2 points on average on the final test.
+- $\beta_1$: This is the coefficient for `attendance_centered`. For every percentage point above 80 that people attend school, they score 1.56 points higher on the final test.
+- $\beta_2$: This is the coefficient for the attendance program, and this is the one we care about the most. This is the shift in intercept when `treatment` is true, or the difference between scores at the threshold. Being in the attendance program increases final scores by 5.88 points. This difference is statistically significant (t = 9.89; p < 0.001).
+
+:::
+
+Now make two new datasets based on the one you made previously with the `attendance_centered` variable. Filter one so that it only contains observations where `attendance_centered` is between -5 and 5, and filter the other so that it only contains observations where `attendance_centered` is between -10 and 10.
+
+Run the same model (`grade ~ attendance_centered + treatment`) using each of these data frames. Interpret the coefficients. Are they different from the model that uses the complete data?
+
+::: {.callout-tip title="Answer"}
+
+```{r}
+#| label: different-bandwidth-models
+
+program_bw_10 <- program |>
+  filter(attendance_centered >= -10 & attendance_centered <= 10)
+
+program_bw_5 <- program |>
+  filter(attendance_centered >= -5, attendance_centered <= 5)
+
+model_bw_10 <- lm(grade ~ attendance_centered + treatment, data = program_bw_10)
+model_bw_5 <- lm(grade ~ attendance_centered + treatment, data = program_bw_5)
+```
+
+:::
+
+**Put all three models in a side-by-side table with `modelsummary()`. How does the coefficient for `treatment` change across the model specifications? How does the number of observations change? What advantages and disadvantages are there to restricting the data to ±5 or ±10 around the cutpoint? Which program effect do you believe the most? Why?**
+
+::: {.callout-tip title="Answer"}
+
+```{r}
+#| label: tbl-all-parametric-results
+
+modelsummary(
+  list(
+    "Full data" = model_simple,
+    "Bandwidth = 10" = model_bw_10,
+    "Bandwidth = 5" = model_bw_5
+  ),
+  coef_rename = c(
+    "attendance_centered" = "Attendance (centered)",
+    "treatmentTRUE" = "Treatment"
+  ),
+  gof_map = c("nobs", "r.squared", "adj.r.squared", "F"),
+  stars = TRUE,
+  fmt = 2
+) |>
+  # Add a nice header above the three model columns
+  group_tt(j = list("Outcome: Final test grade" = 2:4))
+```
+
+The size of the jump at the cutoff changes as the bandwidth shrinks. If we only look at observations that are ±10 percentage points around the cutoff, the gap grows a lot to 11.87, which is significant (p < 0.001). Narrowing the bandwidth more to ±5 gives us a gap of 12.34 (still significant; p < 0.001). We *should* limit the data to only the people right before and after the cutoff—the underlying principle behind regression discontinuity is that the people right before and after are the most comparable. If we run a model with the complete data, we'll be comparing people with 10% attendance and with 99% attendance, and there are clearly underlying differences between those outcomes. Those with 79% and 81%, however, are more comparable and provide us with a better division into treatment and control. Plus, as we saw above, a linear model that uses the full data is inaccurate because the trend isn't linear—the line underestimates the gap at the cutoff.
+
+However, throwing away data outside of the bandwidth has some issues. Notice how the sample size (N) in @tbl-all-parametric-results shrinks substantially as the bandwidth shrinks. We move from 1,200 observations in the full model to 640 when the bandwidth is 10, to only 330 when the bandwidth is 5. This makes our standard errors get bigger and can hamper our ability to make valid inferences.
+
+Even so, I'd trust the estimate for the model with the narrowest bandwidth, since it's modeling the program effect for people who are the most similar.
+
+:::
+
+
+## Nonparametric estimation
+
+Next you'll use nonparametric estimation to figure out the size of the gap around the cutpoint. Remember from class that this means we're not using straight lines anymore---we're using curvy lines that don't really have neat $y = mx + b$ equations behind them, so we can't use `lm()` and regular coefficients. Instead, we can use `rdrobust()` to measure the size of the gap.
+
+Use `rdrobust()` with all its default options to find the effect of the program. You'll need to specify `y`, `x`, and `c`. Also, make sure you pipe the output of `rdrobust()` to `summary()`.
+
+**How big of an effect does the program have at the cutpoint? Is the effect statistically significant?** Important: if you see a negative number, you can pretend that it's positive. It's negative because the change in trend goes down.
+
+::: {.callout-tip title="Answer"}
+
+Based on a nonparametric model with a bandwidth of 8.112 and a triangular kernel, there is a 12.013 point gap at the cutoff, and the gap is statistically significant (z = 8.619; p < 0.001). The plot below shows this effect nicely.
+
+```{r}
+#| label: rdrobust-normal
+
+rdrobust(y = program$grade, x = program$attendance, c = 80) |>
+  summary()
+```
+
+:::
+
+Make a plot of the effect using `rdplot()`. You'll use the same `y`, `x`, and `c` that you did in `rdrobust()` above.
+
+::: {.callout-tip title="Answer"}
+
+```{r}
+#| label: fig-rdplot-basic
+#| fig-width: 4.5
+#| fig-height: 4
+#| fig-alt: |
+#|   Regression discontinuity plot of attendance in junior year (x-axis)
+#|   against final test grade (y-axis). Binned means of the outcome are
+#|   shown as dots on each side of the 80% attendance cutoff, with polynomial
+#|   curves fitted separately to each side. A clear upward jump in the fitted
+#|   curve at the cutoff illustrates the estimated program effect of roughly
+#|   12 points for students near the threshold.
+
+rdplot(y = program$grade, x = program$attendance, c = 80)
+```
+
+:::
+
+## Nonparametric sensitivity checks
+
+Now that we have an effect, we can adjust some of the default options to see how robust the effect size is.
+
+First we'll play with the bandwidth. Find the ideal bandwidth with `rdbwselect()`, then run `rdrobust` with twice that bandwidth and half that bandwidth (hint: use `h = SOMETHING`).
+
+::: {.callout-tip title="Answer"}
+
+```{r}
+#| label: rdbwselect
+
+rdbwselect(y = program$grade, x = program$attendance, c = 80) |>
+  summary()
+```
+
+According to `rdbwselect()`, the ideal bandwidth given the data is 8.112, based on the `mserd` criterion, or mean squared error (MSE) approach. See `?rdbwselect` for details about all the possible bandwidth selection procedures.
+
+We can halve that and double that to see how much our estimate changes:
+
+```{r}
+#| label: rdrobust-different-bandwidths
+
+# Half bandwidth
+rdrobust(y = program$grade, x = program$attendance, c = 80, h = 8.112 / 2) |>
+  summary()
+
+# Double bandwidth
+rdrobust(y = program$grade, x = program$attendance, c = 80, h = 8.112 * 2) |>
+  summary()
+```
+
+Not much changes. The gap is significant in both models. When using the smaller bandwidth (±4.056), the size of the gap is 12.761, and when using the bigger bandwidth (±16.224), it's 11.327.
+
+:::
+
+Next we'll play with the kernel. Use the default ideal bandwidth and adjust the kernel to change how heavily weighted the observations right by the cutoff are. You already used a triangular kernel---that was the first `rdrobust()` model you ran, since triangular is the default. Try using Epanechnikov and uniform kernels:
+
+::: {.callout-tip title="Answer"}
+
+```{r}
+#| label: rdrobust-different-kernels
+
+# rdrobust() with an Epanechnikov kernel
+rdrobust(
+  y = program$grade, x = program$attendance,
+  c = 80, kernel = "epanechnikov"
+) |>
+  summary()
+
+# rdrobust() with a uniform kernel
+rdrobust(
+  y = program$grade, x = program$attendance,
+  c = 80, kernel = "uniform"
+) |>
+  summary()
+```
+
+Changing the kernel does very little to influence the size of the gap. With an Epanechnikov kernel (and an ideal bandwidth of 7.780), the gap is 11.910 points (p < 0.001), and with a uniform kernel (and an ideal bandwidth of 6.441), it is 11.531 points (p < 0.001). The measured program effect is thus not dependent on the kernel specification.
+
+:::
+
+
+# Step 6: Compare all the effects
+
+**Make a list of all the effects you found.**
+
+::: {.callout-tip title="Answer"}
+
+|    Method     |    Bandwidth    |    Kernel    | Estimate |
+|:-------------:|:---------------:|:------------:|:--------:|
+|  Parametric   |    Full data    |  Unweighted  |  5.884   |
+|  Parametric   |       10        |  Unweighted  |  11.869  |
+|  Parametric   |        5        |  Unweighted  |  12.340  |
+| Nonparametric |      8.112      |  Triangular  |  12.013  |
+| Nonparametric |  4.056 (half)   |  Triangular  |  12.761  |
+| Nonparametric | 16.224 (double) |  Triangular  |  11.327  |
+| Nonparametric |      7.780      | Epanechnikov |  11.910  |
+| Nonparametric |      6.441      |   Uniform    |  11.531  |
+
+: All treatment effects {#tbl-all-effects}
+
+:::
+
+**Does the program have an effect? Which estimate do you trust the most? Why? Should the program be rolled out to all schools? Why or why not?**
+
+::: {.callout-tip title="Answer"}
+As seen in @tbl-all-effects, the program has a definite effect, causing an increase of about 12 points in the final grade for those around the cutoff (the local average treatment effect, or LATE). The estimate is lowest when using a parametric model on the full data, since the relationship between attendance and grades is not linear, which makes it so the linear trend underestimates the size of the gap. The estimate is more consistent when using either parametric or nonparametric models with a bandwidth, since those fit the data around the cutoff specifically. The nonparametric estimate changes very little across different bandwidths and kernels.
+
+Whether it should be rolled out to all schools is a different question. There is clear causal evidence that the program has a substantial and significant LATE. However, actually rolling out the program depends on more than just evidence—there are politics involved, questions of funding, etc. Also, because this is the LATE, it's only really valid for students in the bandwidth area (i.e. with attendance of 80% ± 8ish). If a school has higher or lower average attendance, the causal evidence we have doesn't apply to it.
+:::
+
+# References
